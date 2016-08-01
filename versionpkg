@@ -1,10 +1,92 @@
-#!/bin/sh
+#!/bin/bash
 
-# versionpkg - a makepkg wrapper for building CVS/SVN pkgs
-# dibblethewrecker.at.jiwe.org
+# name: versionpkg
+# desc: a makepkg wrapper for building CVS/SVN/Mercurial pkgs
+# orig: dibblethewrecker.at.jiwe.org
+# cont: ality.at.pbrane.org
+# cont: TGates81.at.gmail.com
 
 # makepkg configuration
 [ -f /etc/makepkg.conf ] && source /etc/makepkg.conf
+
+myver="0.7"
+
+version() {
+	echo "versionpkg version $myver"
+}
+
+usage() {
+	version
+	echo
+	echo "Usage: $0 [options]"
+	echo
+	echo "Options:"
+	echo "<NO OPTS>            update SVN/CVS/MERCURIAL version numbers and call makepkg."
+	echo "-f,  --force         force version replacement and build even if package versions"
+	echo "                     are the same."
+	echo "-c, --check-only     check for newer versions and print to screen."
+	echo "-m, --modify-only    modify the PKGBUILD with newer version and omit building."
+	echo "-o=<\"OPTS\">      pass OPTS to makepkg. Must enclose in double quotes"
+	echo "-v, --version        display version and exit."
+	echo "-h, --help           show this help message and exit."
+	echo
+}
+
+FORCE=0
+CHECK_ONLY=0
+MODIFY_ONLY=0
+MAKEPKG_OPTS=""
+
+while [ "$#" -ne "0" ]; do
+	case $1 in
+		--force)          FORCE=1 ;;
+		--check-only)     CHECK_ONLY=1 ;;
+		--modify-only)    MODIFY_ONLY=1 ;;
+		--version)
+			version
+			exit 0
+			;;
+		--help)
+			usage
+			exit 0 
+			;;
+		--*)
+			usage
+			exit 1
+			;;
+		-*)
+			while getopts "fcmo:vh-" opt; do
+				case $opt in
+					f)     FORCE=1 ;;
+					c)     CHECK_ONLY=1 ;;
+					m)     MODIFY_ONLY=1 ;;
+					v)
+						version
+						exit 0
+						;;
+					o)	MAKEPKG_OPTS=$(echo $OPTARG |sed 's|^=||g') 
+						;;
+					h)
+						usage
+						exit 0
+						;;
+					-)
+						break
+						;;
+					*)
+						usage
+						exit 1
+						;;
+				esac
+			done
+			;;
+		*)
+			true
+			;;
+	esac
+	shift
+done
+
 
 # SUBROUTINES
 plain() {
@@ -36,32 +118,92 @@ error() {
 	fi
 }
 
-source PKGBUILD
+# main functions
+update_pb() {
+	sed -i "1,11 s/pkgver=$oldpkgver/pkgver=$1/" ./PKGBUILD
+}
+
+revert_pb() {
+	error "Reverting pkgver..."
+	sed -i "1,11 s/pkgver=[^ ]*/pkgver=$oldpkgver/" ./PKGBUILD
+	exit 1
+}
+
+if [ -f ./PKGBUILD ]; then
+	source PKGBUILD || exit 1 
+else
+	error "./PKGBUILD not found"
+	exit 1
+fi
+
 oldpkgver=$pkgver
+if [ "$MAKEPKG_OPTS" != "" ]; then
+	msg "Using makepkg opts \`$MAKEPKG_OPTS'"
+fi
 
 if [ ! -z ${_cvsroot} ] && [ ! -z ${_cvsmod} ] ; then
-	cvsdate=`date +%Y%m%d`
-	sed -i "1,11 s|pkgver=$oldpkgver|pkgver=$cvsdate|" ./PKGBUILD
-	makepkg $@
-	if [ $? -gt 0 ] ; then
-		error "Reverting pkgver..."
-		sed -i "1,11 s|pkgver=$cvsdate|pkgver=$oldpkgver|" ./PKGBUILD
-	fi     	
+	msg "Determining latest cvs revision... \\c"
+	latestver=$(date +%Y%m%d)
+	echo $latestver
 elif [ ! -z ${_svntrunk} ] && [ ! -z ${_svnmod} ] ; then
-	svnrevno=`svn log $_svntrunk --limit 1 | grep -m 1 -o "r.*" | cut -d \| -f 1 | sed s@r@@g`
-	msg "Current revision number is $svnrevno"
-	if [ "${1}" != "-f" ] && [ "${oldpkgver}" == "${svnrevno}" ] ; then
-		error "No new revision available.  (use -f to overwrite)"
-		exit
-	fi
-	sleep 3
-	sed -i "1,11 s|pkgver=$oldpkgver|pkgver=$svnrevno|" ./PKGBUILD
-	makepkg $@
-	if [ $? -gt 0 ] ; then
-		error "Reverting pkgver..."
-		sed -i "1,11 s|pkgver=$svnrevno|pkgver=$oldpkgver|" ./PKGBUILD
-	fi 
+	msg "Retrieving latest revision number from svn... \\c"
+	latestver=$(svn log $_svntrunk --limit 1 | sed -n 's/^r\([^ ]*\) .*$/\1/p')
+	echo "$latestver"
+elif [ ! -z ${_hgroot} ] && [ ! -z ${_hgrepo} ] ; then
+	if [ -d ./src/$_hgrepo ] ; then
+		msg "Retrieving latest revision number from hg... \\c"
+		cd ./src/$_hgrepo
+		make clean
+		hg pull
+		hg update
+	else
+		msg "Determining latest hg revision... \\c"
+		hg clone $_hgroot/$_hgrepo ./src/$_hgrepo
+		cd ./src/$_hgrepo
+ 	fi
+	latestver=$(hg tip | sed -n '1s/[^0-9]*\([^:]*\):.*$/\1/p')
+	echo "$latestver"
+	cd ../../
 else
-	error "No SVN or CVS variables found! Aborting..."
-	exit
+	error "No SVN, CVS, or Mercurial variables found! Aborting... "
+	exit 1
+fi
+
+if [ "$latestver" = "" ]; then
+	error "Unable to retrieve revision number"
+	exit 1
+elif [ "$latestver" != "$oldpkgver" ]; then
+	msg "Newer revision detected: $latestver"
+	if [ "$CHECK_ONLY" = "1" ]; then
+		exit 0
+	fi
+	if [ "$MODIFY_ONLY" = "1" ]; then
+		msg "Modifying PKGBUILD to pkgver=$latestver... "
+		update_pb $latestver
+		exit 0
+	fi
+	update_pb $latestver
+	makepkg $MAKEPKG_OPTS || revert_pb
+	exit 0
+else
+	warning "PKGBUILD pkgver is $oldpkgver, no newer revision available"
+	if [ "$CHECK_ONLY" = "1" ]; then
+		exit 0
+	fi
+	if [ "$MODIFY_ONLY" = "1" ]; then
+		true
+		# don't exit yet, check if FORCE flag is set 
+	fi
+	if [ "$FORCE" = "1" ]; then
+		msg "Forcing pkgver to $latestver... "
+	       	update_pb $latestver
+		if [ "$MODIFY_ONLY" = "1" ]; then
+			exit 0
+		fi
+		makepkg $MAKEPKG_OPTS || revert_pb
+		exit 0
+	else
+		error "Exiting now, use versionpkg -f to force update"
+		exit 1
+	fi
 fi
